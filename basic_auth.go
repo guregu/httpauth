@@ -1,3 +1,4 @@
+// Basic http auth for kami
 package httpauth
 
 import (
@@ -8,10 +9,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/guregu/kami"
+	"golang.org/x/net/context"
 )
 
 type basicAuth struct {
-	h    http.Handler
 	opts AuthOptions
 }
 
@@ -23,24 +26,24 @@ type AuthOptions struct {
 	Realm               string
 	User                string
 	Password            string
-	UnauthorizedHandler http.Handler
+	UnauthorizedHandler func(ctx context.Context, w http.ResponseWriter, r *http.Request)
 }
 
 // Satisfies the http.Handler interface for basicAuth.
-func (b basicAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (b basicAuth) serve(ctx context.Context, w http.ResponseWriter, r *http.Request) context.Context {
 	// Check if we have a user-provided error handler, else set a default
 	if b.opts.UnauthorizedHandler == nil {
-		b.opts.UnauthorizedHandler = http.HandlerFunc(defaultUnauthorizedHandler)
+		b.opts.UnauthorizedHandler = defaultUnauthorizedHandler
 	}
 
 	// Check that the provided details match
 	if b.authenticate(r) == false {
-		b.requestAuth(w, r)
-		return
+		b.requestAuth(ctx, w, r)
+		return nil
 	}
 
 	// Call the next handler on success.
-	b.h.ServeHTTP(w, r)
+	return ctx
 }
 
 // authenticate retrieves and then validates the user:password combination provided in
@@ -87,13 +90,13 @@ func (b *basicAuth) authenticate(r *http.Request) bool {
 }
 
 // Require authentication, and serve our error handler otherwise.
-func (b *basicAuth) requestAuth(w http.ResponseWriter, r *http.Request) {
+func (b *basicAuth) requestAuth(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm=%q`, b.opts.Realm))
-	b.opts.UnauthorizedHandler.ServeHTTP(w, r)
+	b.opts.UnauthorizedHandler(ctx, w, r)
 }
 
 // defaultUnauthorizedHandler provides a default HTTP 401 Unauthorized response.
-func defaultUnauthorizedHandler(w http.ResponseWriter, r *http.Request) {
+func defaultUnauthorizedHandler(_ context.Context, w http.ResponseWriter, r *http.Request) {
 	http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 }
 
@@ -125,11 +128,8 @@ func defaultUnauthorizedHandler(w http.ResponseWriter, r *http.Request) {
 // Note: HTTP Basic Authentication credentials are sent in plain text, and therefore it does
 // not make for a wholly secure authentication mechanism. You should serve your content over
 // HTTPS to mitigate this, noting that "Basic Authentication" is meant to be just that: basic!
-func BasicAuth(o AuthOptions) func(http.Handler) http.Handler {
-	fn := func(h http.Handler) http.Handler {
-		return basicAuth{h, o}
-	}
-	return fn
+func BasicAuth(o AuthOptions) kami.Middleware {
+	return (basicAuth{o}).serve
 }
 
 // SimpleBasicAuth is a convenience wrapper around BasicAuth. It takes a user and password, and
@@ -150,7 +150,7 @@ func BasicAuth(o AuthOptions) func(http.Handler) http.Handler {
 //          goji.Get("/thing", myHandler)
 //      }
 //
-func SimpleBasicAuth(user, password string) func(http.Handler) http.Handler {
+func SimpleBasicAuth(user, password string) kami.Middleware {
 	opts := AuthOptions{
 		Realm:    "Restricted",
 		User:     user,
